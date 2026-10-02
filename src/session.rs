@@ -97,6 +97,29 @@ impl DocumentSession {
         true
     }
 
+    /// Moves a tab in front of `before`, or to the end when `before` is `None`.
+    pub fn move_tab(&mut self, id: u64, before: Option<u64>) -> bool {
+        if before == Some(id) {
+            return false;
+        }
+        let Some(from) = self.tabs.iter().position(|tab| tab.id == id) else {
+            return false;
+        };
+        let tab = self.tabs.remove(from);
+        let to = match before {
+            Some(before) => match self.tabs.iter().position(|tab| tab.id == before) {
+                Some(index) => index,
+                None => {
+                    self.tabs.insert(from, tab);
+                    return false;
+                }
+            },
+            None => self.tabs.len(),
+        };
+        self.tabs.insert(to, tab);
+        to != from
+    }
+
     pub fn save(&self, path: &Path) -> io::Result<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -214,6 +237,44 @@ mod tests {
             session.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>(),
             vec![first, third]
         );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    fn tab_ids(session: &DocumentSession) -> Vec<u64> {
+        session.tabs.iter().map(|tab| tab.id).collect()
+    }
+
+    #[test]
+    fn moving_a_tab_reorders_without_changing_the_active_tab() {
+        let dir = temp_dir("move");
+        let mut session = DocumentSession::default();
+        let a = session.open(dir.join("a.md"), false);
+        let b = session.open(dir.join("b.md"), false);
+        let c = session.open(dir.join("c.md"), false);
+
+        assert!(session.move_tab(c, Some(a)));
+        assert_eq!(tab_ids(&session), vec![c, a, b]);
+        assert!(session.move_tab(c, None));
+        assert_eq!(tab_ids(&session), vec![a, b, c]);
+        assert!(session.move_tab(a, Some(c)));
+        assert_eq!(tab_ids(&session), vec![b, a, c]);
+        assert_eq!(session.active_id, Some(c));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn moving_to_an_unknown_or_same_position_is_rejected() {
+        let dir = temp_dir("move-reject");
+        let mut session = DocumentSession::default();
+        let a = session.open(dir.join("a.md"), false);
+        let b = session.open(dir.join("b.md"), false);
+
+        assert!(!session.move_tab(a, Some(a)));
+        assert!(!session.move_tab(a, Some(999)));
+        assert!(!session.move_tab(a, Some(b)));
+        assert!(!session.move_tab(b, None));
+        assert!(!session.move_tab(999, None));
+        assert_eq!(tab_ids(&session), vec![a, b]);
         let _ = fs::remove_dir_all(dir);
     }
 

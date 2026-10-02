@@ -40,6 +40,7 @@ enum UserEvent {
     OpenPaths(Vec<PathBuf>, bool),
     ActivateTab(u64),
     CloseTab(u64),
+    MoveTab(u64, Option<u64>),
     CloseActiveTab,
     LocateTab(u64),
     FileChanged(PathBuf), // external change: refresh preview AND textarea
@@ -1286,6 +1287,10 @@ body.has-tabs {{ --chrome-top: 50px; }}
 	  font: 16px/1 -apple-system, BlinkMacSystemFont, sans-serif; opacity: .58;
 	}}
 	.tab-close:hover {{ opacity: 1; background: rgba(0,0,0,.08); }}
+	.tab.dragging {{ opacity: .45; }}
+	.tab.drop-before {{ box-shadow: inset 2px 0 0 #2979c9; }}
+	.tab.drop-after {{ box-shadow: inset -2px 0 0 #2979c9; }}
+	body.tab-dragging, body.tab-dragging * {{ cursor: grabbing !important; }}
 	.tab-open {{
 	  width: 31px; height: 31px; flex: 0 0 auto; padding: 0; border: 0; border-radius: 7px;
 	  color: #666; background: transparent; cursor: pointer; font: 20px/1 -apple-system, sans-serif;
@@ -2127,6 +2132,7 @@ body.editing #btn-print {{ display: none; }}
 	  window.ipc.postMessage('external-change:' + (dirty ? 'dirty' : 'clean'));
 	}};
 	window.__setTabs = function(tabs) {{
+	  finishTabDrag(false);
 	  tabs = Array.isArray(tabs) ? tabs : [];
 	  tabsEl.textContent = '';
 	  activeTabId = 0;
@@ -2158,6 +2164,80 @@ body.editing #btn-print {{ display: none; }}
 	    if (tab.active) requestAnimationFrame(function() {{ item.scrollIntoView({{ block: 'nearest', inline: 'nearest' }}); }});
 	  }});
 	}};
+	tabsEl.addEventListener('mousedown', function(e) {{
+	  // Middle button would otherwise start autoscroll or paste the X11 primary selection.
+	  if (e.button === 1 && e.target.closest && e.target.closest('[data-tab-id]')) e.preventDefault();
+	}});
+	tabsEl.addEventListener('auxclick', function(e) {{
+	  if (e.button !== 1) return;
+	  var tab = e.target && e.target.closest ? e.target.closest('[data-tab-id]') : null;
+	  if (!tab) return;
+	  e.preventDefault();
+	  requestTabAction('close', tab.getAttribute('data-tab-id'));
+	}});
+	var tabDrag = null;
+	var suppressTabClick = false;
+	function clearTabDropMarks() {{
+	  tabsEl.querySelectorAll('.drop-before, .drop-after').forEach(function(el) {{
+	    el.classList.remove('drop-before', 'drop-after');
+	  }});
+	}}
+	function updateTabDropTarget(x) {{
+	  clearTabDropMarks();
+	  var bounds = tabsEl.getBoundingClientRect();
+	  if (x < bounds.left + 24) tabsEl.scrollLeft -= 12;
+	  else if (x > bounds.right - 24) tabsEl.scrollLeft += 12;
+	  var items = Array.prototype.filter.call(tabsEl.querySelectorAll('[data-tab-id]'), function(item) {{
+	    return item !== tabDrag.el && item.offsetParent !== null;
+	  }});
+	  var next = null;
+	  for (var i = 0; i < items.length; i++) {{
+	    var rect = items[i].getBoundingClientRect();
+	    if (x < rect.left + rect.width / 2) {{ next = items[i]; break; }}
+	  }}
+	  tabDrag.before = next ? next.getAttribute('data-tab-id') : '0';
+	  if (next) next.classList.add('drop-before');
+	  else if (items.length) items[items.length - 1].classList.add('drop-after');
+	}}
+	function finishTabDrag(commit) {{
+	  var drag = tabDrag;
+	  tabDrag = null;
+	  if (!drag || !drag.active) return;
+	  clearTabDropMarks();
+	  drag.el.classList.remove('dragging');
+	  document.body.classList.remove('tab-dragging');
+	  suppressTabClick = true;
+	  setTimeout(function() {{ suppressTabClick = false; }}, 0);
+	  if (commit && drag.before !== null) window.ipc.postMessage('tab-move:' + drag.id + ':' + drag.before);
+	}}
+	tabsEl.addEventListener('pointerdown', function(e) {{
+	  if (e.button !== 0 || !e.target.closest) return;
+	  var tab = e.target.closest('[data-tab-id]');
+	  if (!tab || e.target.closest('[data-close-tab]')) return;
+	  tabDrag = {{ el: tab, id: tab.getAttribute('data-tab-id'), startX: e.clientX, pointerId: e.pointerId, active: false, before: null }};
+	}});
+	tabsEl.addEventListener('pointermove', function(e) {{
+	  if (!tabDrag || e.pointerId !== tabDrag.pointerId) return;
+	  if (!tabDrag.active) {{
+	    if (Math.abs(e.clientX - tabDrag.startX) < 5) return;
+	    tabDrag.active = true;
+	    tabsEl.setPointerCapture(e.pointerId);
+	    tabDrag.el.classList.add('dragging');
+	    document.body.classList.add('tab-dragging');
+	  }}
+	  updateTabDropTarget(e.clientX);
+	}});
+	tabsEl.addEventListener('pointerup', function() {{ finishTabDrag(true); }});
+	tabsEl.addEventListener('pointercancel', function() {{ finishTabDrag(false); }});
+	document.addEventListener('keydown', function(e) {{
+	  if (e.key === 'Escape' && tabDrag && tabDrag.active) finishTabDrag(false);
+	}});
+	tabsEl.addEventListener('click', function(e) {{
+	  if (!suppressTabClick) return;
+	  suppressTabClick = false;
+	  e.preventDefault();
+	  e.stopPropagation();
+	}}, true);
 	tabsEl.addEventListener('keydown', function(e) {{
 	  if (e.key !== 'Enter' && e.key !== ' ') return;
 	  var tab = e.target && e.target.closest ? e.target.closest('[data-tab-id]') : null;
@@ -2783,6 +2863,8 @@ mod tests {
         assert!(page.contains("id=\"tabbar\""));
         assert!(page.contains("window.__setTabs"));
         assert!(page.contains("tab-action:'));") || page.contains("'tab-action:' + action"));
+        assert!(page.contains("'tab-move:' + drag.id + ':' + drag.before"));
+        assert!(page.contains("tabsEl.addEventListener('auxclick'"));
         assert!(page.contains("window.__markSaved"));
         assert!(
             !page.contains("window.ipc.postMessage('save:' + ta.value);\n\t    setDirty(false);")
@@ -4719,6 +4801,13 @@ fn main() {
                     }
                     _ => {}
                 }
+            } else if let Some(rest) = body.strip_prefix("tab-move:") {
+                if let Some((id, before)) = rest.split_once(':') {
+                    if let (Ok(id), Ok(before)) = (id.parse::<u64>(), before.parse::<u64>()) {
+                        let before = (before != 0).then_some(before);
+                        let _ = proxy_for_ipc.send_event(UserEvent::MoveTab(id, before));
+                    }
+                }
             } else if let Some(id) = body.strip_prefix("locate-tab:") {
                 if let Ok(id) = id.parse::<u64>() {
                     let _ = proxy_for_ipc.send_event(UserEvent::LocateTab(id));
@@ -5029,6 +5118,13 @@ fn main() {
                     } else {
                         update_tabs(&webview, &session);
                     }
+                }
+            }
+            TaoEvent::UserEvent(UserEvent::MoveTab(id, before)) => {
+                let mut session = session_for_event.lock().unwrap();
+                if session.move_tab(id, before) {
+                    persist_session(&session);
+                    update_tabs(&webview, &session);
                 }
             }
             TaoEvent::UserEvent(UserEvent::CloseActiveTab) => {
