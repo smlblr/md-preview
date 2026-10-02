@@ -8,7 +8,7 @@ mod session;
 
 use notify::{Event, RecursiveMode, Watcher};
 use pulldown_cmark::{html, CowStr, Event as MdEvent, Options, Parser, Tag, TagEnd};
-use session::DocumentSession;
+use session::{DocumentSession, TabLayoutChange};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Component;
@@ -40,6 +40,8 @@ enum UserEvent {
     OpenPaths(Vec<PathBuf>, bool),
     ActivateTab(u64),
     CloseTab(u64),
+    CloseGroup(u64),
+    TabLayout(TabLayoutChange),
     CloseActiveTab,
     LocateTab(u64),
     FileChanged(PathBuf), // external change: refresh preview AND textarea
@@ -201,6 +203,15 @@ struct Strings {
     search_placeholder: &'static str,
     stat_words: &'static str,
     stat_chars: &'static str,
+    group_new: &'static str,
+    group_move_to: &'static str,
+    group_remove_tab: &'static str,
+    group_unnamed: &'static str,
+    group_name_placeholder: &'static str,
+    group_collapse: &'static str,
+    group_expand: &'static str,
+    group_ungroup: &'static str,
+    group_close: &'static str,
 }
 
 impl Strings {
@@ -233,6 +244,15 @@ impl Strings {
                 search_placeholder: "搜索",
                 stat_words: "字",
                 stat_chars: "字符",
+                group_new: "添加到新组",
+                group_move_to: "移到组",
+                group_remove_tab: "从组中移除",
+                group_unnamed: "未命名组",
+                group_name_placeholder: "为此组命名",
+                group_collapse: "折叠组",
+                group_expand: "展开组",
+                group_ungroup: "取消分组",
+                group_close: "关闭组",
             },
             Lang::En => Strings {
                 drop_hint: "Drop a .md file here or press Cmd/Ctrl+O to open",
@@ -261,6 +281,15 @@ impl Strings {
                 search_placeholder: "Find",
                 stat_words: "non-space",
                 stat_chars: "chars",
+                group_new: "Add to New Group",
+                group_move_to: "Move to Group",
+                group_remove_tab: "Remove from Group",
+                group_unnamed: "Unnamed group",
+                group_name_placeholder: "Name this group",
+                group_collapse: "Collapse Group",
+                group_expand: "Expand Group",
+                group_ungroup: "Ungroup",
+                group_close: "Close Group",
             },
         }
     }
@@ -848,10 +877,61 @@ fn tabs_json(session: &DocumentSession) -> String {
                 "active": session.active_id == Some(tab.id),
                 "missing": tab.missing,
                 "dirty": tab.dirty,
+                "group": tab.group,
             })
         })
         .collect::<Vec<_>>();
     serde_json::to_string(&tabs).expect("tab state is serializable")
+}
+
+fn tab_groups_json(session: &DocumentSession) -> String {
+    serde_json::to_string(&session.groups).expect("tab groups are serializable")
+}
+
+/// Parses tab bar IPC: `tab-move:<id>:<before|0>:<group|0>`, `tab-group:new:<id>`,
+/// `tab-group:assign:<id>:<group|0>` and `group:<rename|color|toggle|ungroup>:<group>[:<arg>]`.
+fn parse_tab_layout_message(body: &str) -> Option<TabLayoutChange> {
+    fn id(value: &str) -> Option<u64> {
+        value.parse::<u64>().ok().filter(|id| *id != 0)
+    }
+    fn optional_id(value: &str) -> Option<Option<u64>> {
+        value.parse::<u64>().ok().map(|id| (id != 0).then_some(id))
+    }
+    if let Some(rest) = body.strip_prefix("tab-move:") {
+        let mut parts = rest.split(':');
+        let change = TabLayoutChange::Move {
+            id: id(parts.next()?)?,
+            before: optional_id(parts.next()?)?,
+            group: optional_id(parts.next()?)?,
+        };
+        return parts.next().is_none().then_some(change);
+    }
+    if let Some(rest) = body.strip_prefix("tab-group:") {
+        let mut parts = rest.split(':');
+        let change = match (parts.next()?, parts.next()?, parts.next()) {
+            ("new", tab, None) => TabLayoutChange::NewGroup(id(tab)?),
+            ("assign", tab, Some(group)) => {
+                TabLayoutChange::AssignGroup(id(tab)?, optional_id(group)?)
+            }
+            _ => return None,
+        };
+        return parts.next().is_none().then_some(change);
+    }
+    let rest = body.strip_prefix("group:")?;
+    let mut parts = rest.splitn(3, ':');
+    let action = parts.next()?;
+    let group = id(parts.next()?)?;
+    let arg = parts.next();
+    match (action, arg) {
+        ("rename", Some(name)) => Some(TabLayoutChange::RenameGroup(group, name.to_string())),
+        ("color", Some(color)) => color
+            .parse::<u8>()
+            .ok()
+            .map(|color| TabLayoutChange::RecolorGroup(group, color)),
+        ("toggle", None) => Some(TabLayoutChange::ToggleGroup(group)),
+        ("ungroup", None) => Some(TabLayoutChange::Ungroup(group)),
+        _ => None,
+    }
 }
 
 fn missing_preview_html(tab_id: u64, path: &Path, s: &Strings) -> String {
@@ -1264,14 +1344,14 @@ body.has-tabs {{ --chrome-top: 50px; }}
 	  backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
 	}}
 	body.has-tabs .tabbar {{ display: flex; }}
-	.tabs {{ display: flex; flex: 1; min-width: 0; gap: 4px; overflow-x: auto; scrollbar-width: none; }}
+	.tabs {{ position: relative; display: flex; flex: 1; min-width: 0; gap: 4px; overflow-x: auto; scrollbar-width: none; }}
 	.tabs::-webkit-scrollbar {{ display: none; }}
 	.tab {{
 	  flex: 0 1 180px; min-width: 96px; max-width: 200px; height: 31px;
 	  display: flex; align-items: center; gap: 7px; padding: 0 8px 0 10px;
 	  box-sizing: border-box; border: 1px solid transparent; border-radius: 7px;
-	  color: #6b6b6b; background: transparent; cursor: default; user-select: none;
-	  font-size: 13px;
+	  color: #6b6b6b; background: transparent; cursor: default;
+	  -webkit-user-select: none; user-select: none; font-size: 13px;
 	}}
 	.tab:hover {{ background: rgba(0,0,0,0.045); }}
 	.tab.active {{ color: #202020; background: #fff; border-color: #ddd; box-shadow: 0 1px 2px rgba(0,0,0,.04); }}
@@ -1286,6 +1366,65 @@ body.has-tabs {{ --chrome-top: 50px; }}
 	  font: 16px/1 -apple-system, BlinkMacSystemFont, sans-serif; opacity: .58;
 	}}
 	.tab-close:hover {{ opacity: 1; background: rgba(0,0,0,.08); }}
+	#tabs .tab.dragging {{
+	  position: relative; z-index: 3; background: #fff; border-color: #ddd;
+	  box-shadow: 0 3px 10px rgba(0,0,0,.18); transition: none;
+	}}
+	body.tab-dragging, body.tab-dragging * {{
+	  cursor: grabbing !important; -webkit-user-select: none !important; user-select: none !important;
+	}}
+	.tabbar, .tab-menu {{
+	  --gc0: #1a73e8; --gc1: #d93025; --gc2: #e37400; --gc3: #188038;
+	  --gc4: #d01884; --gc5: #9334e6; --gc6: #007b83; --gc7: #5f6368; --gc-ink: #fff;
+	}}
+	.gc0 {{ --group-color: var(--gc0); }} .gc1 {{ --group-color: var(--gc1); }}
+	.gc2 {{ --group-color: var(--gc2); }} .gc3 {{ --group-color: var(--gc3); }}
+	.gc4 {{ --group-color: var(--gc4); }} .gc5 {{ --group-color: var(--gc5); }}
+	.gc6 {{ --group-color: var(--gc6); }} .gc7 {{ --group-color: var(--gc7); }}
+	.tab.grouped {{ position: relative; }}
+	.tab.grouped::after {{
+	  content: ''; position: absolute; left: 6px; right: 6px; bottom: 1px; height: 2px;
+	  border-radius: 1px; background: var(--group-color); pointer-events: none;
+	}}
+	.tab.grouped:not(.active) {{ background: color-mix(in srgb, var(--group-color) 9%, transparent); }}
+	.tab.grouped:not(.active):hover {{ background: color-mix(in srgb, var(--group-color) 16%, transparent); }}
+	.tab.group-hidden {{ display: none; }}
+	.tab-group-chip {{
+	  flex: 0 0 auto; align-self: center; display: flex; align-items: center; gap: 5px;
+	  height: 22px; max-width: 140px; box-sizing: border-box; padding: 0 8px; border-radius: 6px;
+	  color: var(--gc-ink); background: var(--group-color); cursor: pointer;
+	  -webkit-user-select: none; user-select: none;
+	  font-size: 12px; font-weight: 600; outline-offset: 2px;
+	}}
+	.tab-group-chip.unnamed {{ padding: 0; width: 14px; height: 14px; border-radius: 50%; }}
+	.tab-group-chip.unnamed.collapsed {{ width: auto; height: 22px; padding: 0 7px; border-radius: 6px; }}
+	.tab-group-name {{ min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+	.tab-group-count {{ font-variant-numeric: tabular-nums; opacity: .85; }}
+	.tab-menu {{
+	  position: fixed; z-index: 400; min-width: 200px; max-width: 280px; box-sizing: border-box;
+	  padding: 4px; border: 1px solid #ddd; border-radius: 8px; color: #222; background: #fff;
+	  box-shadow: 0 6px 24px rgba(0,0,0,.14); font-size: 13px;
+	}}
+	.tab-menu-item {{
+	  width: 100%; display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+	  border: 0; border-radius: 5px; color: inherit; background: transparent; cursor: pointer;
+	  font: inherit; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+	}}
+	.tab-menu-item:hover, .tab-menu-item:focus-visible {{ background: rgba(0,0,0,.06); outline: none; }}
+	.tab-menu-heading {{ padding: 6px 10px 2px; color: #888; font-size: 11px; }}
+	.tab-menu-dot {{ width: 10px; height: 10px; flex: 0 0 auto; border-radius: 50%; background: var(--group-color); }}
+	.tab-menu-sep {{ height: 1px; margin: 4px 6px; background: #e6e6e6; }}
+	.tab-menu-name {{
+	  width: 100%; box-sizing: border-box; margin: 2px 0 6px; padding: 6px 8px;
+	  border: 1px solid #ccc; border-radius: 5px; color: inherit; background: transparent; font: inherit;
+	}}
+	.tab-menu-name:focus {{ outline: 2px solid #2979c9; outline-offset: -1px; border-color: transparent; }}
+	.tab-menu-swatches {{ display: flex; flex-wrap: wrap; gap: 6px; padding: 2px 4px 4px; }}
+	.tab-menu-swatch {{
+	  width: 20px; height: 20px; padding: 0; border: 0; border-radius: 50%; cursor: pointer;
+	  background: var(--group-color); box-shadow: inset 0 0 0 2px transparent;
+	}}
+	.tab-menu-swatch.selected {{ outline: 2px solid var(--group-color); outline-offset: 2px; }}
 	.tab-open {{
 	  width: 31px; height: 31px; flex: 0 0 auto; padding: 0; border: 0; border-radius: 7px;
 	  color: #666; background: transparent; cursor: pointer; font: 20px/1 -apple-system, sans-serif;
@@ -1433,8 +1572,17 @@ body.empty .toolbar.has-update button:not(.update-btn) {{ display: none !importa
 	  .tab {{ color: #aaa; }}
 	  .tab:hover {{ background: rgba(255,255,255,.07); }}
 	  .tab.active {{ color: #eee; background: #2c2c2c; border-color: #444; }}
+	  #tabs .tab.dragging {{ background: #2c2c2c; border-color: #444; box-shadow: 0 3px 10px rgba(0,0,0,.5); }}
 	  .tab.missing {{ color: #e3a04b; }}
 	  .tab-close:hover, .tab-open:hover {{ background: rgba(255,255,255,.1); color: #fff; }}
+	  .tabbar, .tab-menu {{
+	    --gc0: #8ab4f8; --gc1: #f28b82; --gc2: #fdd663; --gc3: #81c995;
+	    --gc4: #ff8bcb; --gc5: #c58af9; --gc6: #78d9ec; --gc7: #bdc1c6; --gc-ink: #202124;
+	  }}
+	  .tab-menu {{ color: #eee; background: #2c2c2c; border-color: #444; box-shadow: 0 6px 24px rgba(0,0,0,.5); }}
+	  .tab-menu-item:hover, .tab-menu-item:focus-visible {{ background: rgba(255,255,255,.08); }}
+	  .tab-menu-sep {{ background: #444; }}
+	  .tab-menu-name {{ border-color: #555; }}
 	  .missing-file p {{ color: #aaa; }}
 	  .missing-actions button {{ background: #292929; border-color: #444; color: #ddd; }}
 	  .missing-actions button:hover {{ background: #333; }}
@@ -1499,9 +1647,20 @@ body[data-color-theme="one-dark-pro"] .tabbar {{ background: rgba(33,37,43,.96);
 body[data-color-theme="one-dark-pro"] .tab {{ color: #818896; }}
 body[data-color-theme="one-dark-pro"] .tab:hover {{ background: rgba(255,255,255,.07); }}
 body[data-color-theme="one-dark-pro"] .tab.active {{ color: #abb2bf; background: #2c313c; border-color: #4b5362; }}
+body[data-color-theme="one-dark-pro"] #tabs .tab.dragging {{ background: #2c313c; border-color: #4b5362; box-shadow: 0 3px 10px rgba(0,0,0,.5); }}
 body[data-color-theme="one-dark-pro"] .tab.missing {{ color: #e5c07b; }}
 body[data-color-theme="one-dark-pro"] .tab-close:hover,
 body[data-color-theme="one-dark-pro"] .tab-open:hover {{ background: rgba(255,255,255,.1); color: #fff; }}
+body[data-color-theme="one-dark-pro"] .tabbar,
+body[data-color-theme="one-dark-pro"] .tab-menu {{
+  --gc0: #61afef; --gc1: #e06c75; --gc2: #e5c07b; --gc3: #98c379;
+  --gc4: #ff79c6; --gc5: #c678dd; --gc6: #56b6c2; --gc7: #9da5b4; --gc-ink: #21252b;
+}}
+body[data-color-theme="one-dark-pro"] .tab-menu {{ color: #abb2bf; background: #21252b; border-color: #4b5362; box-shadow: 0 6px 24px rgba(0,0,0,.5); }}
+body[data-color-theme="one-dark-pro"] .tab-menu-item:hover,
+body[data-color-theme="one-dark-pro"] .tab-menu-item:focus-visible {{ background: rgba(255,255,255,.07); }}
+body[data-color-theme="one-dark-pro"] .tab-menu-sep {{ background: #4b5362; }}
+body[data-color-theme="one-dark-pro"] .tab-menu-name {{ border-color: #4b5362; }}
 body[data-color-theme="one-dark-pro"] .missing-file p {{ color: #818896; }}
 body[data-color-theme="one-dark-pro"] .missing-actions button {{ background: #2c313c; border-color: #4b5362; color: #abb2bf; }}
 body[data-color-theme="one-dark-pro"] .missing-actions button:hover {{ background: #363c47; }}
@@ -1530,7 +1689,7 @@ body.editing #btn-print {{ display: none; }}
 }}
 
 @media print {{
-  .toolbar, .tabbar, #editor {{ display: none !important; }}
+  .toolbar, .tabbar, .tab-menu, #editor {{ display: none !important; }}
   #preview {{ display: block !important; }}
   #app {{ max-width: none; padding: 0; }}
   #preview .mdp-table-wrap {{ width: auto; margin: 1em 0; transform: none; overflow: visible; }}
@@ -2126,14 +2285,46 @@ body.editing #btn-print {{ display: none; }}
 	  cancelPendingAutosave();
 	  window.ipc.postMessage('external-change:' + (dirty ? 'dirty' : 'clean'));
 	}};
-	window.__setTabs = function(tabs) {{
+	function groupChip(group, tabs) {{
+	  var count = tabs.filter(function(tab) {{ return tab.group === group.id; }}).length;
+	  var chip = document.createElement('div');
+	  chip.className = 'tab-group-chip gc' + group.color + (group.collapsed ? ' collapsed' : '') + (group.name ? '' : ' unnamed');
+	  chip.setAttribute('data-group-id', group.id);
+	  chip.setAttribute('role', 'button');
+	  chip.setAttribute('tabindex', '0');
+	  chip.setAttribute('aria-expanded', group.collapsed ? 'false' : 'true');
+	  chip.title = groupLabel(group) + ' (' + count + ')';
+	  var label = document.createElement('span');
+	  label.className = 'tab-group-name';
+	  label.textContent = group.name;
+	  chip.appendChild(label);
+	  if (group.collapsed) {{
+	    var badge = document.createElement('span');
+	    badge.className = 'tab-group-count';
+	    badge.textContent = count;
+	    chip.appendChild(badge);
+	  }}
+	  return chip;
+	}}
+	window.__setTabs = function(tabs, groups) {{
+	  finishTabDrag('discard');
 	  tabs = Array.isArray(tabs) ? tabs : [];
+	  groups = Array.isArray(groups) ? groups : [];
+	  tabState = tabs;
+	  lastTabGroups = groups;
+	  tabGroups = {{}};
+	  groups.forEach(function(group) {{ tabGroups[group.id] = group; }});
 	  tabsEl.textContent = '';
 	  activeTabId = 0;
 	  document.body.classList.toggle('has-tabs', tabs.length > 0);
+	  var previousGroup = 0;
 	  tabs.forEach(function(tab) {{
+	    var group = tab.group ? tabGroups[tab.group] : null;
+	    if (group && tab.group !== previousGroup) tabsEl.appendChild(groupChip(group, tabs));
+	    previousGroup = group ? tab.group : 0;
 	    var item = document.createElement('div');
 	    item.className = 'tab' + (tab.active ? ' active' : '') + (tab.missing ? ' missing' : '') + (tab.dirty ? ' dirty' : '');
+	    if (group) item.className += ' grouped gc' + group.color + (group.collapsed && !tab.active ? ' group-hidden' : '');
 	    item.setAttribute('data-tab-id', tab.id);
 	    item.setAttribute('role', 'button');
 	    item.setAttribute('tabindex', '0');
@@ -2157,9 +2348,339 @@ body.editing #btn-print {{ display: none; }}
 	    tabsEl.appendChild(item);
 	    if (tab.active) requestAnimationFrame(function() {{ item.scrollIntoView({{ block: 'nearest', inline: 'nearest' }}); }});
 	  }});
+	  if (tabMenu) {{
+	    var menuTab = Number(tabMenu.getAttribute('data-menu-tab') || 0);
+	    var menuGroup = Number(tabMenu.getAttribute('data-menu-group') || 0);
+	    if ((menuTab && !findTab(menuTab)) || (menuGroup && !tabGroups[menuGroup])) closeTabMenu(false);
+	  }}
+	  if (pendingGroupEditTab) {{
+	    var edited = findTab(pendingGroupEditTab);
+	    pendingGroupEditTab = 0;
+	    var chip = edited && edited.group ? tabsEl.querySelector('[data-group-id="' + edited.group + '"]') : null;
+	    if (chip) {{
+	      var rect = chip.getBoundingClientRect();
+	      openGroupMenu(edited.group, rect.left, rect.bottom + 4, true);
+	    }}
+	  }}
 	}};
+	tabsEl.addEventListener('mousedown', function(e) {{
+	  // Middle button would otherwise start autoscroll or paste the X11 primary selection.
+	  if (e.button === 1 && e.target.closest && e.target.closest('[data-tab-id]')) e.preventDefault();
+	}});
+	tabsEl.addEventListener('auxclick', function(e) {{
+	  if (e.button !== 1) return;
+	  var tab = e.target && e.target.closest ? e.target.closest('[data-tab-id]') : null;
+	  if (!tab) return;
+	  e.preventDefault();
+	  requestTabAction('close', tab.getAttribute('data-tab-id'));
+	}});
+	var TAB_MENU_TEXT = {tab_menu_text_json};
+	var GROUP_COLOR_COUNT = {group_color_count};
+	var tabState = [];
+	var tabGroups = {{}};
+	var lastTabGroups = [];
+	var pendingGroupEditTab = 0;
+	var tabMenu = null;
+	var tabDrag = null;
+	var suppressTabClick = false;
+	function findTab(id) {{
+	  for (var i = 0; i < tabState.length; i++) if (tabState[i].id === id) return tabState[i];
+	  return null;
+	}}
+	function groupLabel(group) {{
+	  return group.name || TAB_MENU_TEXT.unnamed;
+	}}
+	function slotGroup(slot) {{
+	  if (slot.hasAttribute('data-group-id')) {{
+	    var group = tabGroups[slot.getAttribute('data-group-id')];
+	    return group && !group.collapsed ? group.id : 0;
+	  }}
+	  var tab = findTab(Number(slot.getAttribute('data-tab-id')));
+	  return tab && tab.group ? tab.group : 0;
+	}}
+	function slotFirstTab(slot, dragId) {{
+	  if (slot.hasAttribute('data-tab-id')) return Number(slot.getAttribute('data-tab-id'));
+	  var group = Number(slot.getAttribute('data-group-id'));
+	  for (var i = 0; i < tabState.length; i++) {{
+	    if (tabState[i].group === group && tabState[i].id !== dragId) return tabState[i].id;
+	  }}
+	  return 0;
+	}}
+	function dragSiblings(el) {{
+	  return Array.prototype.filter.call(tabsEl.children, function(slot) {{
+	    return slot !== el && slot.offsetParent !== null;
+	  }});
+	}}
+	function slideTabsWhile(mutate) {{
+	  var moving = Array.prototype.filter.call(tabsEl.children, function(slot) {{ return slot !== tabDrag.el; }});
+	  var lefts = moving.map(function(slot) {{ return slot.offsetLeft; }});
+	  mutate();
+	  moving.forEach(function(slot, i) {{
+	    var dx = lefts[i] - slot.offsetLeft;
+	    if (!dx) return;
+	    slot.style.transition = 'none';
+	    slot.style.transform = 'translateX(' + dx + 'px)';
+	    void slot.offsetWidth;
+	    slot.style.transition = 'transform 120ms ease';
+	    slot.style.transform = '';
+	  }});
+	}}
+	function updateTabDrag(x) {{
+	  var drag = tabDrag;
+	  var el = drag.el;
+	  var bounds = tabsEl.getBoundingClientRect();
+	  if (x < bounds.left + 24) tabsEl.scrollLeft -= 12;
+	  else if (x > bounds.right - 24) tabsEl.scrollLeft += 12;
+	  var width = el.offsetWidth;
+	  var pointer = x - bounds.left + tabsEl.scrollLeft;
+	  var left = Math.max(0, Math.min(pointer - drag.grabOffset, tabsEl.scrollWidth - width));
+	  // Siblings whose centre is left of the pointer come before the dragged tab; passing a
+	  // neighbour shifts it by one tab width, which gives natural hysteresis.
+	  var slots = dragSiblings(el);
+	  var index = 0;
+	  while (index < slots.length && slots[index].offsetLeft + slots[index].offsetWidth / 2 < pointer) index++;
+	  var next = slots[index] || null;
+	  var currentNext = el.nextElementSibling;
+	  while (currentNext && currentNext.offsetParent === null) currentNext = currentNext.nextElementSibling;
+	  if (currentNext !== next) {{
+	    slideTabsWhile(function() {{ tabsEl.insertBefore(el, next); }});
+	  }}
+	  el.style.transform = 'translateX(' + (left - el.offsetLeft) + 'px)';
+	  var dragId = Number(drag.id);
+	  var prev = slots[index - 1] || null;
+	  var before = 0;
+	  for (var j = index; j < slots.length && !before; j++) before = slotFirstTab(slots[j], dragId);
+	  var prevGroup = prev ? slotGroup(prev) : 0;
+	  var nextGroup = next && next.hasAttribute('data-tab-id') ? slotGroup(next) : 0;
+	  var group = 0;
+	  if (prevGroup && prevGroup === nextGroup) group = prevGroup;
+	  else if (prev && prev.hasAttribute('data-group-id')) group = prevGroup;
+	  // At a group's trailing edge, leaning left joins (or keeps) the group.
+	  else if (prevGroup && pointer < el.offsetLeft + width / 2) group = prevGroup;
+	  drag.before = String(before);
+	  drag.group = group;
+	  for (var c = 0; c < GROUP_COLOR_COUNT; c++) el.classList.remove('gc' + c);
+	  el.classList.toggle('grouped', !!(group && tabGroups[group]));
+	  if (group && tabGroups[group]) el.classList.add('gc' + tabGroups[group].color);
+	}}
+	// mode: 'commit' sends the move, 'cancel' restores the last rendered order,
+	// 'discard' just drops drag state because a fresh render is about to happen.
+	function finishTabDrag(mode) {{
+	  var drag = tabDrag;
+	  tabDrag = null;
+	  if (!drag || !drag.active) return;
+	  document.body.classList.remove('tab-dragging');
+	  suppressTabClick = true;
+	  setTimeout(function() {{ suppressTabClick = false; }}, 0);
+	  if (mode === 'commit' && drag.before !== null) {{
+	    drag.el.classList.remove('dragging');
+	    drag.el.style.transform = '';
+	    window.ipc.postMessage('tab-move:' + drag.id + ':' + drag.before + ':' + drag.group);
+	  }} else if (mode === 'cancel') {{
+	    window.__setTabs(tabState, lastTabGroups);
+	  }}
+	}}
+	function closeTabMenu(commit) {{
+	  if (!tabMenu) return;
+	  var menu = tabMenu;
+	  tabMenu = null;
+	  if (commit !== false && menu.__commit) menu.__commit();
+	  menu.remove();
+	}}
+	function menuItem(menu, label, onPick, swatchColor) {{
+	  var item = document.createElement('button');
+	  item.type = 'button';
+	  item.className = 'tab-menu-item';
+	  item.setAttribute('role', 'menuitem');
+	  if (swatchColor !== undefined) {{
+	    var swatch = document.createElement('span');
+	    swatch.className = 'tab-menu-dot gc' + swatchColor;
+	    item.appendChild(swatch);
+	  }}
+	  item.appendChild(document.createTextNode(label));
+	  item.addEventListener('click', function(e) {{
+	    e.preventDefault();
+	    e.stopPropagation();
+	    closeTabMenu();
+	    onPick();
+	  }});
+	  menu.appendChild(item);
+	}}
+	function menuSeparator(menu) {{
+	  var line = document.createElement('div');
+	  line.className = 'tab-menu-sep';
+	  menu.appendChild(line);
+	}}
+	function showTabMenu(menu, x, y) {{
+	  closeTabMenu();
+	  menu.className = 'tab-menu';
+	  menu.setAttribute('role', 'menu');
+	  document.body.appendChild(menu);
+	  tabMenu = menu;
+	  menu.style.left = Math.max(4, Math.min(x, window.innerWidth - menu.offsetWidth - 4)) + 'px';
+	  menu.style.top = Math.max(4, Math.min(y, window.innerHeight - menu.offsetHeight - 4)) + 'px';
+	}}
+	function groupsInTabOrder() {{
+	  var seen = [];
+	  tabState.forEach(function(tab) {{
+	    if (tab.group && seen.indexOf(tab.group) < 0 && tabGroups[tab.group]) seen.push(tab.group);
+	  }});
+	  return seen.map(function(id) {{ return tabGroups[id]; }});
+	}}
+	function openTabMenu(tabId, x, y) {{
+	  var tab = findTab(tabId);
+	  if (!tab) return;
+	  var menu = document.createElement('div');
+	  menu.setAttribute('data-menu-tab', tabId);
+	  menuItem(menu, TAB_MENU_TEXT.newGroup, function() {{
+	    pendingGroupEditTab = tabId;
+	    window.ipc.postMessage('tab-group:new:' + tabId);
+	  }});
+	  var targets = groupsInTabOrder().filter(function(group) {{ return group.id !== tab.group; }});
+	  if (targets.length) {{
+	    var heading = document.createElement('div');
+	    heading.className = 'tab-menu-heading';
+	    heading.textContent = TAB_MENU_TEXT.moveTo;
+	    menu.appendChild(heading);
+	    targets.forEach(function(group) {{
+	      menuItem(menu, groupLabel(group), function() {{
+	        window.ipc.postMessage('tab-group:assign:' + tabId + ':' + group.id);
+	      }}, group.color);
+	    }});
+	  }}
+	  if (tab.group) {{
+	    menuItem(menu, TAB_MENU_TEXT.removeTab, function() {{
+	      window.ipc.postMessage('tab-group:assign:' + tabId + ':0');
+	    }});
+	  }}
+	  menuSeparator(menu);
+	  menuItem(menu, TAB_MENU_TEXT.closeTab, function() {{ requestTabAction('close', tabId); }});
+	  showTabMenu(menu, x, y);
+	}}
+	function openGroupMenu(groupId, x, y, focusName) {{
+	  var group = tabGroups[groupId];
+	  if (!group) return;
+	  var menu = document.createElement('div');
+	  menu.setAttribute('data-menu-group', groupId);
+	  var input = document.createElement('input');
+	  input.className = 'tab-menu-name';
+	  input.type = 'text';
+	  input.maxLength = 40;
+	  input.value = group.name;
+	  input.placeholder = TAB_MENU_TEXT.namePlaceholder;
+	  var sentName = group.name;
+	  menu.__commit = function() {{
+	    var name = input.value.trim();
+	    if (name === sentName) return;
+	    sentName = name;
+	    window.ipc.postMessage('group:rename:' + groupId + ':' + name);
+	  }};
+	  input.addEventListener('keydown', function(e) {{
+	    e.stopPropagation();
+	    if (e.key === 'Enter') {{ e.preventDefault(); closeTabMenu(); }}
+	    else if (e.key === 'Escape') {{ e.preventDefault(); closeTabMenu(false); }}
+	  }});
+	  menu.appendChild(input);
+	  var swatches = document.createElement('div');
+	  swatches.className = 'tab-menu-swatches';
+	  for (var color = 0; color < GROUP_COLOR_COUNT; color++) {{
+	    (function(color) {{
+	      var swatch = document.createElement('button');
+	      swatch.type = 'button';
+	      swatch.className = 'tab-menu-swatch gc' + color + (color === group.color ? ' selected' : '');
+	      swatch.setAttribute('aria-label', 'Color ' + (color + 1));
+	      swatch.addEventListener('click', function(e) {{
+	        e.preventDefault();
+	        e.stopPropagation();
+	        swatches.querySelectorAll('.selected').forEach(function(el) {{ el.classList.remove('selected'); }});
+	        swatch.classList.add('selected');
+	        window.ipc.postMessage('group:color:' + groupId + ':' + color);
+	      }});
+	      swatches.appendChild(swatch);
+	    }})(color);
+	  }}
+	  menu.appendChild(swatches);
+	  menuSeparator(menu);
+	  menuItem(menu, group.collapsed ? TAB_MENU_TEXT.expand : TAB_MENU_TEXT.collapse, function() {{
+	    window.ipc.postMessage('group:toggle:' + groupId);
+	  }});
+	  menuItem(menu, TAB_MENU_TEXT.ungroup, function() {{
+	    window.ipc.postMessage('group:ungroup:' + groupId);
+	  }});
+	  menuItem(menu, TAB_MENU_TEXT.closeGroup, function() {{ requestTabAction('close-group', groupId); }});
+	  showTabMenu(menu, x, y);
+	  if (focusName) {{
+	    input.focus();
+	    input.select();
+	  }}
+	}}
+	tabsEl.addEventListener('contextmenu', function(e) {{
+	  if (!e.target.closest) return;
+	  e.preventDefault();
+	  var chip = e.target.closest('[data-group-id]');
+	  if (chip) {{
+	    openGroupMenu(Number(chip.getAttribute('data-group-id')), e.clientX, e.clientY, false);
+	    return;
+	  }}
+	  var tab = e.target.closest('[data-tab-id]');
+	  if (tab) openTabMenu(Number(tab.getAttribute('data-tab-id')), e.clientX, e.clientY);
+	}});
+	document.addEventListener('pointerdown', function(e) {{
+	  if (tabMenu && !tabMenu.contains(e.target)) closeTabMenu();
+	}}, true);
+	document.addEventListener('keydown', function(e) {{
+	  if (e.key === 'Escape' && tabMenu) closeTabMenu(false);
+	}});
+	window.addEventListener('resize', function() {{ closeTabMenu(); }});
+	window.addEventListener('blur', function() {{ closeTabMenu(); }});
+	tabsEl.addEventListener('click', function(e) {{
+	  var chip = e.target.closest ? e.target.closest('[data-group-id]') : null;
+	  if (!chip) return;
+	  e.preventDefault();
+	  e.stopPropagation();
+	  window.ipc.postMessage('group:toggle:' + chip.getAttribute('data-group-id'));
+	}});
+	tabsEl.addEventListener('pointerdown', function(e) {{
+	  if (e.button !== 0 || !e.target.closest) return;
+	  var tab = e.target.closest('[data-tab-id]');
+	  if (!tab || e.target.closest('[data-close-tab]')) return;
+	  tabDrag = {{
+	    el: tab, id: tab.getAttribute('data-tab-id'), startX: e.clientX, pointerId: e.pointerId,
+	    grabOffset: e.clientX - tab.getBoundingClientRect().left, active: false, before: null, group: 0
+	  }};
+	}});
+	tabsEl.addEventListener('pointermove', function(e) {{
+	  if (!tabDrag || e.pointerId !== tabDrag.pointerId) return;
+	  if (!tabDrag.active) {{
+	    if (Math.abs(e.clientX - tabDrag.startX) < 5) return;
+	    tabDrag.active = true;
+	    tabsEl.setPointerCapture(e.pointerId);
+	    tabDrag.el.classList.add('dragging');
+	    document.body.classList.add('tab-dragging');
+	    var selection = window.getSelection && window.getSelection();
+	    if (selection) selection.removeAllRanges();
+	  }}
+	  updateTabDrag(e.clientX);
+	}});
+	tabsEl.addEventListener('pointerup', function() {{ finishTabDrag('commit'); }});
+	tabsEl.addEventListener('pointercancel', function() {{ finishTabDrag('cancel'); }});
+	document.addEventListener('keydown', function(e) {{
+	  if (e.key === 'Escape' && tabDrag && tabDrag.active) finishTabDrag('cancel');
+	}});
+	tabsEl.addEventListener('click', function(e) {{
+	  if (!suppressTabClick) return;
+	  suppressTabClick = false;
+	  e.preventDefault();
+	  e.stopPropagation();
+	}}, true);
 	tabsEl.addEventListener('keydown', function(e) {{
 	  if (e.key !== 'Enter' && e.key !== ' ') return;
+	  var chip = e.target && e.target.closest ? e.target.closest('[data-group-id]') : null;
+	  if (chip) {{
+	    e.preventDefault();
+	    window.ipc.postMessage('group:toggle:' + chip.getAttribute('data-group-id'));
+	    return;
+	  }}
 	  var tab = e.target && e.target.closest ? e.target.closest('[data-tab-id]') : null;
 	  if (!tab) return;
 	  e.preventDefault();
@@ -2267,6 +2788,19 @@ window.__mdPreviewInstallUpdateCheck({{
         btn_update_js = escape_js(s.btn_update),
         stat_words_js = escape_js(s.stat_words),
         stat_chars_js = escape_js(s.stat_chars),
+        tab_menu_text_json = serde_json::json!({
+            "newGroup": s.group_new,
+            "moveTo": s.group_move_to,
+            "removeTab": s.group_remove_tab,
+            "unnamed": s.group_unnamed,
+            "namePlaceholder": s.group_name_placeholder,
+            "collapse": s.group_collapse,
+            "expand": s.group_expand,
+            "ungroup": s.group_ungroup,
+            "closeGroup": s.group_close,
+            "closeTab": s.close_tab,
+        }),
+        group_color_count = session::GROUP_COLOR_COUNT,
         app_version = update_current_version(),
         test_update_release_js = test_update_release_js(),
         native_updater = native_updater,
@@ -2741,6 +3275,59 @@ mod tests {
     }
 
     #[test]
+    fn tab_layout_messages_parse_strictly() {
+        use TabLayoutChange::*;
+        let ok = [
+            (
+                "tab-move:3:0:0",
+                Move {
+                    id: 3,
+                    before: None,
+                    group: None,
+                },
+            ),
+            (
+                "tab-move:3:5:2",
+                Move {
+                    id: 3,
+                    before: Some(5),
+                    group: Some(2),
+                },
+            ),
+            ("tab-group:new:4", NewGroup(4)),
+            ("tab-group:assign:4:0", AssignGroup(4, None)),
+            ("tab-group:assign:4:7", AssignGroup(4, Some(7))),
+            (
+                "group:rename:2:Plans: Q4",
+                RenameGroup(2, "Plans: Q4".into()),
+            ),
+            ("group:rename:2:", RenameGroup(2, String::new())),
+            ("group:color:2:5", RecolorGroup(2, 5)),
+            ("group:toggle:2", ToggleGroup(2)),
+            ("group:ungroup:2", Ungroup(2)),
+        ];
+        for (body, expected) in ok {
+            assert_eq!(parse_tab_layout_message(body), Some(expected), "{body}");
+        }
+        for body in [
+            "tab-move:0:0:0",
+            "tab-move:3:0",
+            "tab-move:3:0:0:9",
+            "tab-move:x:0:0",
+            "tab-group:new:4:1",
+            "tab-group:assign:4",
+            "tab-group:other:4",
+            "group:color:2:256",
+            "group:toggle:2:x",
+            "group:rename:0:x",
+            "group:delete:2",
+            "tab-action:close:1",
+        ] {
+            assert_eq!(parse_tab_layout_message(body), None, "{body}");
+        }
+    }
+
+    #[test]
     fn theme_choice_parses_menu_values() {
         assert_eq!(ThemeChoice::from_str("system"), ThemeChoice::System);
         assert_eq!(ThemeChoice::from_str("light"), ThemeChoice::Light);
@@ -2783,6 +3370,8 @@ mod tests {
         assert!(page.contains("id=\"tabbar\""));
         assert!(page.contains("window.__setTabs"));
         assert!(page.contains("tab-action:'));") || page.contains("'tab-action:' + action"));
+        assert!(page.contains("'tab-move:' + drag.id + ':' + drag.before + ':' + drag.group"));
+        assert!(page.contains("tabsEl.addEventListener('auxclick'"));
         assert!(page.contains("window.__markSaved"));
         assert!(
             !page.contains("window.ipc.postMessage('save:' + ta.value);\n\t    setDirty(false);")
@@ -4337,8 +4926,11 @@ fn persist_session(session: &DocumentSession) {
 }
 
 fn update_tabs(webview: &WebView, session: &DocumentSession) {
-    let state = tabs_json(session);
-    let _ = webview.evaluate_script(&format!("if(window.__setTabs)window.__setTabs({state});"));
+    let tabs = tabs_json(session);
+    let groups = tab_groups_json(session);
+    let _ = webview.evaluate_script(&format!(
+        "if(window.__setTabs)window.__setTabs({tabs},{groups});"
+    ));
 }
 
 fn update_window_title(window: &Window, session: &DocumentSession) {
@@ -4717,8 +5309,13 @@ fn main() {
                     "close" => {
                         let _ = proxy_for_ipc.send_event(UserEvent::CloseTab(id));
                     }
+                    "close-group" => {
+                        let _ = proxy_for_ipc.send_event(UserEvent::CloseGroup(id));
+                    }
                     _ => {}
                 }
+            } else if let Some(change) = parse_tab_layout_message(body) {
+                let _ = proxy_for_ipc.send_event(UserEvent::TabLayout(change));
             } else if let Some(id) = body.strip_prefix("locate-tab:") {
                 if let Ok(id) = id.parse::<u64>() {
                     let _ = proxy_for_ipc.send_event(UserEvent::LocateTab(id));
@@ -5008,12 +5605,17 @@ fn main() {
                     install_file_watcher(&watcher_for_event, &proxy, &last_self_write, path);
                 }
             }
-            TaoEvent::UserEvent(UserEvent::CloseTab(id)) => {
+            TaoEvent::UserEvent(close @ (UserEvent::CloseTab(_) | UserEvent::CloseGroup(_))) => {
                 let mut session = session_for_event.lock().unwrap();
-                let was_active = session.active_id == Some(id);
-                if session.close(id) {
+                let active_before = session.active_id;
+                let closed = match close {
+                    UserEvent::CloseTab(id) => session.close(id),
+                    UserEvent::CloseGroup(group) => session.close_group(group),
+                    _ => unreachable!(),
+                };
+                if closed {
                     persist_session(&session);
-                    if was_active {
+                    if session.active_id != active_before {
                         render_active_document(
                             &webview,
                             &window,
@@ -5030,6 +5632,15 @@ fn main() {
                         update_tabs(&webview, &session);
                     }
                 }
+            }
+            TaoEvent::UserEvent(UserEvent::TabLayout(change)) => {
+                let mut session = session_for_event.lock().unwrap();
+                if session.apply_layout(change) {
+                    persist_session(&session);
+                }
+                // A live drag has already rearranged the DOM; re-render even when the
+                // session rejected or ignored the change so the bar matches it again.
+                update_tabs(&webview, &session);
             }
             TaoEvent::UserEvent(UserEvent::CloseActiveTab) => {
                 if session_for_event.lock().unwrap().active_id.is_some() {
