@@ -47,7 +47,7 @@ En son sürümü [GitHub Releases](https://github.com/vorojar/md-preview/release
 | Platform | Paket | Notlar |
 |---|---|---|
 | Windows | `MD-Preview-windows-x64.exe` | Tek dosyalık uygulama. Uygulama içi güncelleyici bir sonraki exe'yi indirir, SHA-256 özetini doğrular, kendini değiştirir ve yeniden başlar. |
-| Linux | `MD-Preview-linux-x64.tar.gz` | Sistemde WebKitGTK çalışma zamanı gerektirir. |
+| Linux | `MD-Preview-linux-x64.tar.gz`, `MD-Preview-linux-x64.deb`, `MD-Preview-linux-x86_64.AppImage` | Üçü de sistemdeki WebKitGTK çalışma zamanını gerektirir (pakete dahil değil). `.deb` bağımlılıklarını bildirir, masaüstü girdisi ve ikonu kaydeder; AppImage ve tar.gz masaüstüyle otomatik bütünleşmez. |
 | Android | `MD-Preview-Android.apk` | Dosyalar, WeChat, WeCom ve paylaşım sayfalarından Markdown açmak için native Android görüntüleyici. |
 
 Android derlemeleri ayrı mobil sürümler olarak yayınlanır, örneğin [mobile-android-v1.0.10](https://github.com/vorojar/md-preview/releases/tag/mobile-android-v1.0.10).
@@ -207,6 +207,16 @@ cargo build --release
 ```
 
 CI ve release derlemeleri Windows ve Linux'u kapsar. Android ayrı yayınlanır.
+
+Linux `.deb` ve AppImage paketlerini yerelde derlemek için:
+
+```bash
+cargo install cargo-deb --locked
+scripts/build-linux-packages.sh
+```
+
+İkisi de WebKitGTK/GTK'yi içermez — `tar.gz` gibi sistemdeki çalışma zamanına dayanır. `appimagetool` ilk
+çalıştırmada bir kez `.tools/` altına indirilir.
 
 Bakımcı release akışı:
 

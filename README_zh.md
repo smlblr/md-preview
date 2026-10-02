@@ -47,7 +47,7 @@ AI 编程工具现在会生成大量 Markdown：`README.md`、`plan.md`、任务
 | 平台 | 包名 | 说明 |
 |---|---|---|
 | Windows | `MD-Preview-windows-x64.exe` | 单文件应用。应用内更新会下载新版 exe，校验 SHA-256，退出后替换自己并重启。 |
-| Linux | `MD-Preview-linux-x64.tar.gz` | 需要系统 WebKitGTK 运行时。 |
+| Linux | `MD-Preview-linux-x64.tar.gz`、`MD-Preview-linux-x64.deb`、`MD-Preview-linux-x86_64.AppImage` | 三者都需要系统 WebKitGTK 运行时（不随包附带）。`.deb` 会声明依赖并注册桌面入口和图标；AppImage 与 tar.gz 不会自动集成到桌面。 |
 | Android | `MD-Preview-Android.apk` | 原生 Android 预览器，可从文件管理器、微信、企业微信和分享面板打开 Markdown。 |
 
 Android 版本以单独的 mobile release 发布，例如 [mobile-android-v1.0.10](https://github.com/vorojar/md-preview/releases/tag/mobile-android-v1.0.10)。
@@ -207,6 +207,15 @@ cargo build --release
 ```
 
 CI 和桌面发布仅构建 Windows、Linux；Android 单独发布。
+
+在本地构建 Linux `.deb` 和 AppImage：
+
+```bash
+cargo install cargo-deb --locked
+scripts/build-linux-packages.sh
+```
+
+两者都不打包 WebKitGTK/GTK，与 `tar.gz` 一样依赖系统运行时。`appimagetool` 会在首次运行时下载一次到 `.tools/`。
 
 维护者发版流程：
 
