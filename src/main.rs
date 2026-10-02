@@ -1344,14 +1344,14 @@ body.has-tabs {{ --chrome-top: 50px; }}
 	  backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
 	}}
 	body.has-tabs .tabbar {{ display: flex; }}
-	.tabs {{ display: flex; flex: 1; min-width: 0; gap: 4px; overflow-x: auto; scrollbar-width: none; }}
+	.tabs {{ position: relative; display: flex; flex: 1; min-width: 0; gap: 4px; overflow-x: auto; scrollbar-width: none; }}
 	.tabs::-webkit-scrollbar {{ display: none; }}
 	.tab {{
 	  flex: 0 1 180px; min-width: 96px; max-width: 200px; height: 31px;
 	  display: flex; align-items: center; gap: 7px; padding: 0 8px 0 10px;
 	  box-sizing: border-box; border: 1px solid transparent; border-radius: 7px;
-	  color: #6b6b6b; background: transparent; cursor: default; user-select: none;
-	  font-size: 13px;
+	  color: #6b6b6b; background: transparent; cursor: default;
+	  -webkit-user-select: none; user-select: none; font-size: 13px;
 	}}
 	.tab:hover {{ background: rgba(0,0,0,0.045); }}
 	.tab.active {{ color: #202020; background: #fff; border-color: #ddd; box-shadow: 0 1px 2px rgba(0,0,0,.04); }}
@@ -1366,10 +1366,13 @@ body.has-tabs {{ --chrome-top: 50px; }}
 	  font: 16px/1 -apple-system, BlinkMacSystemFont, sans-serif; opacity: .58;
 	}}
 	.tab-close:hover {{ opacity: 1; background: rgba(0,0,0,.08); }}
-	.tab.dragging {{ opacity: .45; }}
-	.tabs .drop-before {{ box-shadow: inset 2px 0 0 var(--drop-color, #2979c9); }}
-	.tabs .drop-after {{ box-shadow: inset -2px 0 0 var(--drop-color, #2979c9); }}
-	body.tab-dragging, body.tab-dragging * {{ cursor: grabbing !important; }}
+	#tabs .tab.dragging {{
+	  position: relative; z-index: 3; background: #fff; border-color: #ddd;
+	  box-shadow: 0 3px 10px rgba(0,0,0,.18); transition: none;
+	}}
+	body.tab-dragging, body.tab-dragging * {{
+	  cursor: grabbing !important; -webkit-user-select: none !important; user-select: none !important;
+	}}
 	.tabbar, .tab-menu {{
 	  --gc0: #1a73e8; --gc1: #d93025; --gc2: #e37400; --gc3: #188038;
 	  --gc4: #d01884; --gc5: #9334e6; --gc6: #007b83; --gc7: #5f6368; --gc-ink: #fff;
@@ -1389,7 +1392,8 @@ body.has-tabs {{ --chrome-top: 50px; }}
 	.tab-group-chip {{
 	  flex: 0 0 auto; align-self: center; display: flex; align-items: center; gap: 5px;
 	  height: 22px; max-width: 140px; box-sizing: border-box; padding: 0 8px; border-radius: 6px;
-	  color: var(--gc-ink); background: var(--group-color); cursor: pointer; user-select: none;
+	  color: var(--gc-ink); background: var(--group-color); cursor: pointer;
+	  -webkit-user-select: none; user-select: none;
 	  font-size: 12px; font-weight: 600; outline-offset: 2px;
 	}}
 	.tab-group-chip.unnamed {{ padding: 0; width: 14px; height: 14px; border-radius: 50%; }}
@@ -1568,6 +1572,7 @@ body.empty .toolbar.has-update button:not(.update-btn) {{ display: none !importa
 	  .tab {{ color: #aaa; }}
 	  .tab:hover {{ background: rgba(255,255,255,.07); }}
 	  .tab.active {{ color: #eee; background: #2c2c2c; border-color: #444; }}
+	  #tabs .tab.dragging {{ background: #2c2c2c; border-color: #444; box-shadow: 0 3px 10px rgba(0,0,0,.5); }}
 	  .tab.missing {{ color: #e3a04b; }}
 	  .tab-close:hover, .tab-open:hover {{ background: rgba(255,255,255,.1); color: #fff; }}
 	  .tabbar, .tab-menu {{
@@ -1642,6 +1647,7 @@ body[data-color-theme="one-dark-pro"] .tabbar {{ background: rgba(33,37,43,.96);
 body[data-color-theme="one-dark-pro"] .tab {{ color: #818896; }}
 body[data-color-theme="one-dark-pro"] .tab:hover {{ background: rgba(255,255,255,.07); }}
 body[data-color-theme="one-dark-pro"] .tab.active {{ color: #abb2bf; background: #2c313c; border-color: #4b5362; }}
+body[data-color-theme="one-dark-pro"] #tabs .tab.dragging {{ background: #2c313c; border-color: #4b5362; box-shadow: 0 3px 10px rgba(0,0,0,.5); }}
 body[data-color-theme="one-dark-pro"] .tab.missing {{ color: #e5c07b; }}
 body[data-color-theme="one-dark-pro"] .tab-close:hover,
 body[data-color-theme="one-dark-pro"] .tab-open:hover {{ background: rgba(255,255,255,.1); color: #fff; }}
@@ -2301,11 +2307,13 @@ body.editing #btn-print {{ display: none; }}
 	  return chip;
 	}}
 	window.__setTabs = function(tabs, groups) {{
-	  finishTabDrag(false);
+	  finishTabDrag('discard');
 	  tabs = Array.isArray(tabs) ? tabs : [];
+	  groups = Array.isArray(groups) ? groups : [];
 	  tabState = tabs;
+	  lastTabGroups = groups;
 	  tabGroups = {{}};
-	  (Array.isArray(groups) ? groups : []).forEach(function(group) {{ tabGroups[group.id] = group; }});
+	  groups.forEach(function(group) {{ tabGroups[group.id] = group; }});
 	  tabsEl.textContent = '';
 	  activeTabId = 0;
 	  document.body.classList.toggle('has-tabs', tabs.length > 0);
@@ -2370,6 +2378,7 @@ body.editing #btn-print {{ display: none; }}
 	var GROUP_COLOR_COUNT = {group_color_count};
 	var tabState = [];
 	var tabGroups = {{}};
+	var lastTabGroups = [];
 	var pendingGroupEditTab = 0;
 	var tabMenu = null;
 	var tabDrag = null;
@@ -2380,12 +2389,6 @@ body.editing #btn-print {{ display: none; }}
 	}}
 	function groupLabel(group) {{
 	  return group.name || TAB_MENU_TEXT.unnamed;
-	}}
-	function clearTabDropMarks() {{
-	  tabsEl.querySelectorAll('.drop-before, .drop-after').forEach(function(el) {{
-	    el.classList.remove('drop-before', 'drop-after');
-	    el.style.removeProperty('--drop-color');
-	  }});
 	}}
 	function slotGroup(slot) {{
 	  if (slot.hasAttribute('data-group-id')) {{
@@ -2403,22 +2406,48 @@ body.editing #btn-print {{ display: none; }}
 	  }}
 	  return 0;
 	}}
-	function updateTabDropTarget(x) {{
-	  clearTabDropMarks();
+	function dragSiblings(el) {{
+	  return Array.prototype.filter.call(tabsEl.children, function(slot) {{
+	    return slot !== el && slot.offsetParent !== null;
+	  }});
+	}}
+	function slideTabsWhile(mutate) {{
+	  var moving = Array.prototype.filter.call(tabsEl.children, function(slot) {{ return slot !== tabDrag.el; }});
+	  var lefts = moving.map(function(slot) {{ return slot.offsetLeft; }});
+	  mutate();
+	  moving.forEach(function(slot, i) {{
+	    var dx = lefts[i] - slot.offsetLeft;
+	    if (!dx) return;
+	    slot.style.transition = 'none';
+	    slot.style.transform = 'translateX(' + dx + 'px)';
+	    void slot.offsetWidth;
+	    slot.style.transition = 'transform 120ms ease';
+	    slot.style.transform = '';
+	  }});
+	}}
+	function updateTabDrag(x) {{
+	  var drag = tabDrag;
+	  var el = drag.el;
 	  var bounds = tabsEl.getBoundingClientRect();
 	  if (x < bounds.left + 24) tabsEl.scrollLeft -= 12;
 	  else if (x > bounds.right - 24) tabsEl.scrollLeft += 12;
-	  var slots = Array.prototype.filter.call(tabsEl.children, function(slot) {{
-	    return slot !== tabDrag.el && slot.offsetParent !== null;
-	  }});
-	  var index = slots.length;
-	  for (var i = 0; i < slots.length; i++) {{
-	    var rect = slots[i].getBoundingClientRect();
-	    if (x < rect.left + rect.width / 2) {{ index = i; break; }}
-	  }}
-	  var dragId = Number(tabDrag.id);
-	  var prev = slots[index - 1] || null;
+	  var width = el.offsetWidth;
+	  var pointer = x - bounds.left + tabsEl.scrollLeft;
+	  var left = Math.max(0, Math.min(pointer - drag.grabOffset, tabsEl.scrollWidth - width));
+	  // Siblings whose centre is left of the pointer come before the dragged tab; passing a
+	  // neighbour shifts it by one tab width, which gives natural hysteresis.
+	  var slots = dragSiblings(el);
+	  var index = 0;
+	  while (index < slots.length && slots[index].offsetLeft + slots[index].offsetWidth / 2 < pointer) index++;
 	  var next = slots[index] || null;
+	  var currentNext = el.nextElementSibling;
+	  while (currentNext && currentNext.offsetParent === null) currentNext = currentNext.nextElementSibling;
+	  if (currentNext !== next) {{
+	    slideTabsWhile(function() {{ tabsEl.insertBefore(el, next); }});
+	  }}
+	  el.style.transform = 'translateX(' + (left - el.offsetLeft) + 'px)';
+	  var dragId = Number(drag.id);
+	  var prev = slots[index - 1] || null;
 	  var before = 0;
 	  for (var j = index; j < slots.length && !before; j++) before = slotFirstTab(slots[j], dragId);
 	  var prevGroup = prev ? slotGroup(prev) : 0;
@@ -2426,25 +2455,30 @@ body.editing #btn-print {{ display: none; }}
 	  var group = 0;
 	  if (prevGroup && prevGroup === nextGroup) group = prevGroup;
 	  else if (prev && prev.hasAttribute('data-group-id')) group = prevGroup;
-	  // Over the right half of a group's last tab the tab joins (or stays in) that group.
-	  else if (prevGroup && x < prev.getBoundingClientRect().right) group = prevGroup;
-	  tabDrag.before = String(before);
-	  tabDrag.group = group;
-	  var marker = next || slots[slots.length - 1];
-	  if (!marker) return;
-	  marker.classList.add(next ? 'drop-before' : 'drop-after');
-	  if (group && tabGroups[group]) marker.style.setProperty('--drop-color', 'var(--gc' + tabGroups[group].color + ')');
+	  // At a group's trailing edge, leaning left joins (or keeps) the group.
+	  else if (prevGroup && pointer < el.offsetLeft + width / 2) group = prevGroup;
+	  drag.before = String(before);
+	  drag.group = group;
+	  for (var c = 0; c < GROUP_COLOR_COUNT; c++) el.classList.remove('gc' + c);
+	  el.classList.toggle('grouped', !!(group && tabGroups[group]));
+	  if (group && tabGroups[group]) el.classList.add('gc' + tabGroups[group].color);
 	}}
-	function finishTabDrag(commit) {{
+	// mode: 'commit' sends the move, 'cancel' restores the last rendered order,
+	// 'discard' just drops drag state because a fresh render is about to happen.
+	function finishTabDrag(mode) {{
 	  var drag = tabDrag;
 	  tabDrag = null;
 	  if (!drag || !drag.active) return;
-	  clearTabDropMarks();
-	  drag.el.classList.remove('dragging');
 	  document.body.classList.remove('tab-dragging');
 	  suppressTabClick = true;
 	  setTimeout(function() {{ suppressTabClick = false; }}, 0);
-	  if (commit && drag.before !== null) window.ipc.postMessage('tab-move:' + drag.id + ':' + drag.before + ':' + drag.group);
+	  if (mode === 'commit' && drag.before !== null) {{
+	    drag.el.classList.remove('dragging');
+	    drag.el.style.transform = '';
+	    window.ipc.postMessage('tab-move:' + drag.id + ':' + drag.before + ':' + drag.group);
+	  }} else if (mode === 'cancel') {{
+	    window.__setTabs(tabState, lastTabGroups);
+	  }}
 	}}
 	function closeTabMenu(commit) {{
 	  if (!tabMenu) return;
@@ -2610,7 +2644,10 @@ body.editing #btn-print {{ display: none; }}
 	  if (e.button !== 0 || !e.target.closest) return;
 	  var tab = e.target.closest('[data-tab-id]');
 	  if (!tab || e.target.closest('[data-close-tab]')) return;
-	  tabDrag = {{ el: tab, id: tab.getAttribute('data-tab-id'), startX: e.clientX, pointerId: e.pointerId, active: false, before: null }};
+	  tabDrag = {{
+	    el: tab, id: tab.getAttribute('data-tab-id'), startX: e.clientX, pointerId: e.pointerId,
+	    grabOffset: e.clientX - tab.getBoundingClientRect().left, active: false, before: null, group: 0
+	  }};
 	}});
 	tabsEl.addEventListener('pointermove', function(e) {{
 	  if (!tabDrag || e.pointerId !== tabDrag.pointerId) return;
@@ -2620,13 +2657,15 @@ body.editing #btn-print {{ display: none; }}
 	    tabsEl.setPointerCapture(e.pointerId);
 	    tabDrag.el.classList.add('dragging');
 	    document.body.classList.add('tab-dragging');
+	    var selection = window.getSelection && window.getSelection();
+	    if (selection) selection.removeAllRanges();
 	  }}
-	  updateTabDropTarget(e.clientX);
+	  updateTabDrag(e.clientX);
 	}});
-	tabsEl.addEventListener('pointerup', function() {{ finishTabDrag(true); }});
-	tabsEl.addEventListener('pointercancel', function() {{ finishTabDrag(false); }});
+	tabsEl.addEventListener('pointerup', function() {{ finishTabDrag('commit'); }});
+	tabsEl.addEventListener('pointercancel', function() {{ finishTabDrag('cancel'); }});
 	document.addEventListener('keydown', function(e) {{
-	  if (e.key === 'Escape' && tabDrag && tabDrag.active) finishTabDrag(false);
+	  if (e.key === 'Escape' && tabDrag && tabDrag.active) finishTabDrag('cancel');
 	}});
 	tabsEl.addEventListener('click', function(e) {{
 	  if (!suppressTabClick) return;
@@ -5598,8 +5637,10 @@ fn main() {
                 let mut session = session_for_event.lock().unwrap();
                 if session.apply_layout(change) {
                     persist_session(&session);
-                    update_tabs(&webview, &session);
                 }
+                // A live drag has already rearranged the DOM; re-render even when the
+                // session rejected or ignored the change so the bar matches it again.
+                update_tabs(&webview, &session);
             }
             TaoEvent::UserEvent(UserEvent::CloseActiveTab) => {
                 if session_for_event.lock().unwrap().active_id.is_some() {
